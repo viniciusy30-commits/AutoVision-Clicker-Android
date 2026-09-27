@@ -1,0 +1,50 @@
+name: Unpack and commit incoming zip
+
+# Como usar:
+# 1. Suba um arquivo .zip para a pasta "_incoming/" do repositório (em qualquer
+#    branch), com os arquivos já organizados dentro do zip nas pastas corretas
+#    do projeto (ex: dentro do zip, o caminho
+#    "app/src/main/java/com/autovision/clicker/ui/MainActivity.kt").
+# 2. Esse workflow roda sozinho, descompacta o zip na raiz do repositório
+#    (substituindo os arquivos existentes), apaga o zip e faz commit
+#    automaticamente no mesmo branch.
+# 3. Depois disso, é só abrir/atualizar o Pull Request normalmente.
+
+on:
+  push:
+    paths:
+      - "_incoming/**.zip"
+
+permissions:
+  contents: write
+
+jobs:
+  unpack:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do branch que recebeu o zip
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Descompactar cada zip encontrado em _incoming/
+        run: |
+          set -e
+          shopt -s nullglob
+          for zip_file in _incoming/*.zip; do
+            echo "Descompactando: $zip_file"
+            unzip -o "$zip_file" -d .
+            rm -f "$zip_file"
+          done
+
+      - name: Commit automático das mudanças
+        run: |
+          git config user.name "autovision-bot"
+          git config user.email "actions@github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nada para commitar."
+          else
+            git commit -m "Aplicar pacote enviado via _incoming/ (automático)"
+            git push
+          fi
