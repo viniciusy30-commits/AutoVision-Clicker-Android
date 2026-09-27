@@ -179,4 +179,12 @@ class ScreenCaptureManager(
     }
 
     fun isCapturing(): Boolean = mediaProjection != null
+
+    /**
+     * Retorna o último frame capturado, sem esperar pelo intervalo de throttle.
+     * Usado pelo AutomationEngine, que precisa da tela mais atual possível no
+     * momento de resolver uma ação IMAGE_MATCH/COLOR_MATCH — esperar o próximo
+     * tick do throttle desperdiçaria tempo sem necessidade.
+     */
+    fun getLatestFrame(): Bitmap? = latestBitmap
 }
