@@ -1,6 +1,7 @@
 package com.autovision.clicker.vision
 
 import android.graphics.Bitmap
+import com.autovision.clicker.models.SearchRegion
 import org.opencv.android.Utils
 import org.opencv.core.Core
 import org.opencv.core.CvType
@@ -9,6 +10,7 @@ import org.opencv.core.Mat
 import org.opencv.core.MatOfDMatch
 import org.opencv.core.MatOfKeyPoint
 import org.opencv.core.Point
+import org.opencv.core.Rect
 import org.opencv.features2d.DescriptorMatcher
 import org.opencv.features2d.ORB
 import org.opencv.imgproc.Imgproc
@@ -24,6 +26,12 @@ import org.opencv.imgproc.Imgproc
  *   mais lento.
  *
  * Cada resultado retorna um confidence de 0 a 100.
+ *
+ * Fase 2: todas as buscas aceitam uma [SearchRegion] opcional — quando
+ * informada, a busca recorta a tela para essa área antes de procurar (mais
+ * rápido e evita falsos positivos fora da área esperada), e as coordenadas do
+ * resultado voltam já somadas ao deslocamento da região, ou seja, sempre no
+ * referencial da tela inteira.
  */
 object ImageRecognitionEngine {
 
@@ -59,6 +67,40 @@ object ImageRecognitionEngine {
         Imgproc.Canny(gray, edges, threshold1, threshold2)
         if (gray !== mat) gray.release()
         return edges
+    }
+
+    /**
+     * Recorta [screen] para a área descrita por [region], já limitada aos
+     * limites reais da imagem (nunca estoura o tamanho de [screen]). Retorna
+     * `null` se a região não tiver nenhuma sobreposição válida com a tela.
+     *
+     * Quem chama esta função é responsável por liberar (`release()`) o Mat
+     * retornado quando ele for diferente de [screen] — por isso o resultado
+     * vem embrulhado em [RegionCrop], que já guarda se é um recorte novo ou a
+     * própria tela original.
+     */
+    data class RegionCrop(val mat: Mat, val offsetX: Int, val offsetY: Int, val isCopy: Boolean) {
+        fun release() {
+            if (isCopy) mat.release()
+        }
+    }
+
+    fun cropToRegion(screen: Mat, region: SearchRegion?): RegionCrop? {
+        if (region == null) {
+            return RegionCrop(mat = screen, offsetX = 0, offsetY = 0, isCopy = false)
+        }
+
+        val left = region.x.coerceIn(0, screen.cols())
+        val top = region.y.coerceIn(0, screen.rows())
+        val right = (region.x + region.width).coerceIn(0, screen.cols())
+        val bottom = (region.y + region.height).coerceIn(0, screen.rows())
+
+        val width = right - left
+        val height = bottom - top
+        if (width <= 0 || height <= 0) return null
+
+        val cropped = Mat(screen, Rect(left, top, width, height))
+        return RegionCrop(mat = cropped, offsetX = left, offsetY = top, isCopy = true)
     }
 
     /**
@@ -188,18 +230,34 @@ object ImageRecognitionEngine {
      * se o confidence ficar baixo, tenta feature matching como reforço. Retorna o
      * melhor dos dois resultados. Isso é o que dá o comportamento "não depender de
      * uma única técnica" pedido no planejamento.
+     *
+     * Quando [region] é informada, a busca é restrita a essa área da tela: mais
+     * rápida, e evita encontrar uma ocorrência parecida fora do lugar esperado.
+     * As coordenadas do [MatchLocation] retornado já vêm no referencial da tela
+     * inteira (com o deslocamento da região somado de volta).
      */
-    fun findImageOnScreen(screen: Mat, template: Mat, minConfidence: Double = 70.0): MatchLocation? {
-        val templateResult = findByTemplate(screen, template)
-        if (templateResult != null && templateResult.confidence >= minConfidence) {
-            return templateResult
+    fun findImageOnScreen(
+        screen: Mat,
+        template: Mat,
+        minConfidence: Double = 70.0,
+        region: SearchRegion? = null
+    ): MatchLocation? {
+        val crop = cropToRegion(screen, region) ?: return null
+        try {
+            val templateResult = findByTemplate(crop.mat, template)
+            val best = if (templateResult != null && templateResult.confidence >= minConfidence) {
+                templateResult
+            } else {
+                val featureResult = findByFeatures(crop.mat, template)
+                listOfNotNull(templateResult, featureResult)
+                    .maxByOrNull { it.confidence }
+                    ?.takeIf { it.confidence >= minConfidence }
+            }
+
+            return best?.copy(x = best.x + crop.offsetX, y = best.y + crop.offsetY)
+        } finally {
+            crop.release()
         }
-
-        val featureResult = findByFeatures(screen, template)
-
-        return listOfNotNull(templateResult, featureResult)
-            .maxByOrNull { it.confidence }
-            ?.takeIf { it.confidence >= minConfidence }
     }
 
     /**
