@@ -6,7 +6,7 @@
     <string name="status_paused">Pausado</string>
     <string name="status_error">Erro</string>
     <string name="dashboard_title">AutoVision Clicker</string>
-    <string name="dashboard_subtitle">Fase 3 — captura de tela + reconhecimento visual (Vision Lab)</string>
+    <string name="dashboard_subtitle">Automação inteligente com reconhecimento visual</string>
     <string name="capture_notification_channel_name">Captura de tela</string>
     <string name="capture_notification_text">AutoVision Clicker está capturando a tela</string>
     <string name="button_start_capture">Iniciar captura</string>
@@ -17,4 +17,3 @@
     <string name="accessibility_service_description">Permite que o AutoVision Clicker execute toques e swipes automaticamente, com base no reconhecimento visual da tela.</string>
     <string name="button_open_accessibility_settings">Ativar serviço de Acessibilidade</string>
 </resources>
-

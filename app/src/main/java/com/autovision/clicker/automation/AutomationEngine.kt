@@ -9,6 +9,9 @@ import com.autovision.clicker.models.AutomationAction
 import com.autovision.clicker.models.AutomationProfile
 import com.autovision.clicker.models.AutomationProgress
 import com.autovision.clicker.models.AutomationRunState
+import com.autovision.clicker.models.ConditionOperator
+import com.autovision.clicker.models.MatchCondition
+import com.autovision.clicker.models.SearchRegion
 import com.autovision.clicker.vision.ColorRecognitionEngine
 import com.autovision.clicker.vision.ImageRecognitionEngine
 import kotlinx.coroutines.CoroutineScope
@@ -29,9 +32,9 @@ import kotlin.coroutines.resume
 
 /**
  * Orquestra a execução de uma [AutomationProfile]: percorre as ações configuradas,
- * resolve as que dependem de visão computacional (IMAGE_MATCH, COLOR_MATCH) contra
- * o frame mais recente da tela, e delega os gestos reais (toques, swipes) para o
- * [AutoVisionAccessibilityService].
+ * resolve as que dependem de visão computacional (IMAGE_MATCH, COLOR_MATCH,
+ * CONDITIONAL_CLICK) contra o frame mais recente da tela, e delega os gestos
+ * reais (toques, swipes) para o [AutoVisionAccessibilityService].
  *
  * O engine não sabe nada sobre UI — ele só expõe [progress] (um StateFlow) para a
  * tela observar, e [start]/[stop]/[pause]/[resume] para controlar a execução.
@@ -165,6 +168,7 @@ class AutomationEngine(
                 ActionType.WAIT -> delay(action.durationMillis)
                 ActionType.IMAGE_MATCH -> executeImageMatch(action)
                 ActionType.COLOR_MATCH -> executeColorMatch(action)
+                ActionType.CONDITIONAL_CLICK -> executeConditionalClick(action)
                 ActionType.SEQUENCE -> for (child in action.children) {
                     if (stopRequested) break
                     waitWhilePaused()
@@ -197,13 +201,19 @@ class AutomationEngine(
         val screenMat = ImageRecognitionEngine.bitmapToMat(screen)
         val templateMat = ImageRecognitionEngine.bitmapToMat(templateBitmap)
 
-        val match = ImageRecognitionEngine.findImageOnScreen(screenMat, templateMat, action.minConfidence)
+        val match = ImageRecognitionEngine.findImageOnScreen(
+            screenMat,
+            templateMat,
+            action.minConfidence,
+            action.searchRegion
+        )
 
         screenMat.release()
         templateMat.release()
 
         if (match == null) {
-            log("Imagem não encontrada na tela (confiança mínima ${action.minConfidence}%)")
+            val regionInfo = action.searchRegion?.let { " na região configurada" } ?: ""
+            log("Imagem não encontrada$regionInfo (confiança mínima ${action.minConfidence}%)")
             return
         }
 
@@ -221,39 +231,7 @@ class AutomationEngine(
         }
 
         val screenMat = ImageRecognitionEngine.bitmapToMat(screen)
-        val targetRgb = action.targetColorRgb
-        val targetScalar = Scalar(
-            (targetRgb and 0xFF).toDouble(),
-            ((targetRgb shr 8) and 0xFF).toDouble(),
-            ((targetRgb shr 16) and 0xFF).toDouble()
-        )
-
-        val hsv = ColorRecognitionEngine.toHsv(screenMat)
-        val toleranceHsv = action.colorTolerance.toDouble()
-        val targetHsvMat = Mat(1, 1, screenMat.type(), targetScalar)
-        val targetHsvConverted = Mat()
-        Imgproc.cvtColor(targetHsvMat, targetHsvConverted, Imgproc.COLOR_BGR2HSV)
-        val targetHsvValue = targetHsvConverted.get(0, 0)
-        targetHsvMat.release()
-        targetHsvConverted.release()
-
-        val lower = Scalar(
-            (targetHsvValue[0] - toleranceHsv).coerceAtLeast(0.0),
-            (targetHsvValue[1] - toleranceHsv * 2).coerceAtLeast(0.0),
-            (targetHsvValue[2] - toleranceHsv * 2).coerceAtLeast(0.0)
-        )
-        val upper = Scalar(
-            (targetHsvValue[0] + toleranceHsv).coerceAtMost(179.0),
-            (targetHsvValue[1] + toleranceHsv * 2).coerceAtMost(255.0),
-            (targetHsvValue[2] + toleranceHsv * 2).coerceAtMost(255.0)
-        )
-
-        val mask = Mat()
-        Core.inRange(hsv, lower, upper, mask)
-        hsv.release()
-
-        val point = findLargestMaskRegionCenter(mask)
-        mask.release()
+        val point = findColorMatch(screenMat, action.targetColorRgb, action.colorTolerance, action.searchRegion)
         screenMat.release()
 
         if (point == null) {
@@ -263,6 +241,137 @@ class AutomationEngine(
 
         log("Cor encontrada em (${point.first}, ${point.second})")
         dispatchClick(point.first, point.second)
+    }
+
+    /**
+     * CONDITIONAL_CLICK: avalia a árvore de [AutomationAction.condition] (E/OU/NÃO
+     * combinando buscas de imagem e cor) contra o frame atual da tela. Só clica em
+     * [AutomationAction.x]/[AutomationAction.y] quando a condição combinada for
+     * satisfeita — do contrário, não faz nada nesta iteração.
+     */
+    private suspend fun executeConditionalClick(action: AutomationAction) {
+        val condition = action.condition
+        if (condition == null) {
+            log("CONDITIONAL_CLICK sem condição configurada")
+            return
+        }
+
+        val screen = captureManager.getLatestFrame()
+        if (screen == null) {
+            log("CONDITIONAL_CLICK sem frame de tela disponível")
+            return
+        }
+
+        val screenMat = ImageRecognitionEngine.bitmapToMat(screen)
+        val satisfied = withContext(Dispatchers.Default) { evaluateCondition(condition, screenMat) }
+        screenMat.release()
+
+        if (!satisfied) {
+            log("Condição não satisfeita — automação não clicou")
+            return
+        }
+
+        log("Condição satisfeita — clicando em (${action.x}, ${action.y})")
+        dispatchClick(action.x, action.y)
+    }
+
+    /**
+     * Avalia recursivamente uma [MatchCondition] contra [screenMat]. Cada folha
+     * (Image/Color) roda uma busca visual isolada; [MatchCondition.Combined] e
+     * [MatchCondition.Negated] combinam os resultados das subárvores.
+     *
+     * Nota: como cada folha faz sua própria busca na tela (a mesma screenMat,
+     * já capturada uma vez), avaliar uma condição com muitas folhas tem custo
+     * proporcional ao número de buscas — aceitável para o uso esperado (poucas
+     * condições combinadas por ação), evitando complexidade extra.
+     */
+    private suspend fun evaluateCondition(condition: MatchCondition, screenMat: Mat): Boolean {
+        return when (condition) {
+            is MatchCondition.Image -> {
+                val path = condition.referenceImagePath
+                if (path.isNullOrBlank()) return false
+                val templateBitmap = withContext(Dispatchers.IO) {
+                    runCatching { BitmapFactory.decodeFile(path) }.getOrNull()
+                } ?: return false
+                val templateMat = ImageRecognitionEngine.bitmapToMat(templateBitmap)
+                val match = ImageRecognitionEngine.findImageOnScreen(
+                    screenMat,
+                    templateMat,
+                    condition.minConfidence,
+                    condition.searchRegion
+                )
+                templateMat.release()
+                match != null
+            }
+            is MatchCondition.Color -> {
+                findColorMatch(
+                    screenMat,
+                    condition.targetColorRgb,
+                    condition.colorTolerance,
+                    condition.searchRegion
+                ) != null
+            }
+            is MatchCondition.Combined -> {
+                val leftResult = evaluateCondition(condition.left, screenMat)
+                when (condition.operator) {
+                    ConditionOperator.AND -> leftResult && evaluateCondition(condition.right, screenMat)
+                    ConditionOperator.OR -> leftResult || evaluateCondition(condition.right, screenMat)
+                }
+            }
+            is MatchCondition.Negated -> !evaluateCondition(condition.condition, screenMat)
+        }
+    }
+
+    /**
+     * Procura a cor [targetRgb] em [screenMat], opcionalmente restrita a [region],
+     * e retorna o centro (no referencial da tela inteira) da maior região
+     * encontrada, ou `null` se nada bater dentro da tolerância.
+     */
+    private fun findColorMatch(
+        screenMat: Mat,
+        targetRgb: Int,
+        colorTolerance: Int,
+        region: SearchRegion?
+    ): Pair<Int, Int>? {
+        val crop = ImageRecognitionEngine.cropToRegion(screenMat, region) ?: return null
+        try {
+            val targetScalar = Scalar(
+                (targetRgb and 0xFF).toDouble(),
+                ((targetRgb shr 8) and 0xFF).toDouble(),
+                ((targetRgb shr 16) and 0xFF).toDouble()
+            )
+
+            val hsv = ColorRecognitionEngine.toHsv(crop.mat)
+            val toleranceHsv = colorTolerance.toDouble()
+            val targetHsvMat = Mat(1, 1, crop.mat.type(), targetScalar)
+            val targetHsvConverted = Mat()
+            Imgproc.cvtColor(targetHsvMat, targetHsvConverted, Imgproc.COLOR_BGR2HSV)
+            val targetHsvValue = targetHsvConverted.get(0, 0)
+            targetHsvMat.release()
+            targetHsvConverted.release()
+
+            val lower = Scalar(
+                (targetHsvValue[0] - toleranceHsv).coerceAtLeast(0.0),
+                (targetHsvValue[1] - toleranceHsv * 2).coerceAtLeast(0.0),
+                (targetHsvValue[2] - toleranceHsv * 2).coerceAtLeast(0.0)
+            )
+            val upper = Scalar(
+                (targetHsvValue[0] + toleranceHsv).coerceAtMost(179.0),
+                (targetHsvValue[1] + toleranceHsv * 2).coerceAtMost(255.0),
+                (targetHsvValue[2] + toleranceHsv * 2).coerceAtMost(255.0)
+            )
+
+            val mask = Mat()
+            Core.inRange(hsv, lower, upper, mask)
+            hsv.release()
+
+            val point = findLargestMaskRegionCenter(mask)
+            mask.release()
+
+            return point?.let { (localX, localY) -> (localX + crop.offsetX) to (localY + crop.offsetY) }
+        } finally {
+            crop.release()
+        }
     }
 
     /** Encontra o centro da maior região conectada de pixels brancos numa máscara binária. */

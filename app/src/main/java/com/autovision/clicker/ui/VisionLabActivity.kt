@@ -10,6 +10,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -26,6 +27,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -45,10 +47,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Vision Lab: tela de testes dos engines de reconhecimento visual, independente
- * da automação em si. O usuário carrega uma imagem da galeria, o app roda
- * detecção de objetos (forma + cor) sobre ela e mostra os resultados com um
- * overlay de debug visual (retângulos, número do objeto, confidence, forma).
+ * Activity independente do Vision Lab, mantida para compatibilidade (por exemplo,
+ * se algo ainda apontar para ela via Intent). A partir da Fase 1, o Vision Lab
+ * passa a ser acessado principalmente pela aba "Vision Lab" da navegação
+ * principal em [MainActivity], que usa a mesma [VisionLabScreen] definida aqui.
  */
 class VisionLabActivity : ComponentActivity() {
 
@@ -115,8 +117,14 @@ class VisionLabActivity : ComponentActivity() {
     }
 }
 
+/**
+ * Tela do Vision Lab, reaproveitável tanto pela [VisionLabActivity] standalone
+ * quanto pela navegação principal em [MainActivity]. Carrega uma imagem da
+ * galeria, roda o [VisionEngine] sobre ela e mostra os resultados com overlay
+ * de debug visual (retângulos, número do objeto, confidence, forma).
+ */
 @Composable
-private fun VisionLabScreen(
+fun VisionLabScreen(
     bitmap: Bitmap?,
     result: VisionAnalysisResult?,
     isProcessing: Boolean,
@@ -132,7 +140,14 @@ private fun VisionLabScreen(
                 .padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Text(text = "Vision Lab", style = MaterialTheme.typography.headlineMedium)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(text = "Vision Lab", style = MaterialTheme.typography.headlineMedium)
+                HelpIcon(content = HelpTopic.VISION_LAB)
+            }
             Text(text = statusMessage, style = MaterialTheme.typography.bodyMedium)
             if (isProcessing) {
                 Text(text = "Processando...", style = MaterialTheme.typography.labelLarge)
