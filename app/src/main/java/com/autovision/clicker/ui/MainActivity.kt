@@ -1,7 +1,10 @@
 package com.autovision.clicker.ui
 
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.projection.MediaProjectionManager
+import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
@@ -20,40 +23,65 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.autovision.clicker.R
+import com.autovision.clicker.automation.AutomationEngine
 import com.autovision.clicker.capture.ScreenCaptureManager
 import com.autovision.clicker.capture.ScreenCaptureService
+import com.autovision.clicker.models.AutomationProfile
 import com.autovision.clicker.models.CaptureInterval
 import com.autovision.clicker.models.DashboardState
 import com.autovision.clicker.models.ModuleStatus
+import com.autovision.clicker.models.VisionAnalysisResult
 import com.autovision.clicker.ui.theme.AutoVisionTheme
+import com.autovision.clicker.vision.VisionEngine
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
- * Dashboard real do AutoVision Clicker (Fase 2).
+ * Activity única do AutoVision Clicker (Fase 1 — reorganização da interface).
  *
- * Controla o ciclo de vida da captura de tela (MediaProjection) e mostra, em tempo
- * real, o status dos módulos, o intervalo de análise configurado e um log simples
- * de eventos. O reconhecimento visual (Vision Lab, engines) chega na Fase 3 —
- * aqui os frames capturados só são contados, ainda não analisados.
+ * Hospeda a navegação por seções (Início, Automações, Reconhecimento, Vision Lab,
+ * Ajustes) através de uma bottom navigation bar, mantendo toda a lógica de captura
+ * de tela (MediaProjection), automação e acessibilidade que já existia — nada foi
+ * removido, apenas reorganizado visualmente.
  */
 class MainActivity : ComponentActivity() {
 
     private val state = MutableStateFlow(DashboardState())
+    private val profiles = MutableStateFlow<List<AutomationProfile>>(emptyList())
+
+    private data class LabState(
+        val bitmap: Bitmap? = null,
+        val result: VisionAnalysisResult? = null,
+        val isProcessing: Boolean = false,
+        val statusMessage: String = "Carregue uma imagem para testar o reconhecimento"
+    )
+
+    private val labState = MutableStateFlow(LabState())
 
     private lateinit var captureManager: ScreenCaptureManager
     private lateinit var mediaProjectionManager: MediaProjectionManager
+    private lateinit var automationEngine: AutomationEngine
 
     private val requestCapturePermission = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -67,6 +95,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val pickLabImage = registerForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri -> if (uri != null) loadAndAnalyzeLabImage(uri) }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -77,23 +109,76 @@ class MainActivity : ComponentActivity() {
             state.update { it.copy(framesCaptured = it.framesCaptured + 1) }
         }
         captureManager.onCaptureStopped = {
-            state.update {
-                it.copy(captureStatus = ModuleStatus.DISABLED)
-            }
+            state.update { it.copy(captureStatus = ModuleStatus.DISABLED) }
             appendLog("Captura interrompida")
         }
+        automationEngine = AutomationEngine(captureManager, lifecycleScope)
 
         setContent {
             AutoVisionTheme {
+                var currentSection by remember { mutableStateOf(AppSection.HOME) }
+
                 val dashboardState by state.asStateFlow().collectAsState()
-                DashboardScreen(
-                    state = dashboardState,
-                    onStartCaptureClick = ::requestScreenCapture,
-                    onStopCaptureClick = ::stopScreenCapture,
-                    onIntervalSelected = ::onIntervalSelected,
-                    onOpenVisionLabClick = ::openVisionLab,
-                    onOpenAccessibilitySettingsClick = ::openAccessibilitySettings
-                )
+                val profileList by profiles.asStateFlow().collectAsState()
+                val runProgress by automationEngine.progress.collectAsState()
+                val lab by labState.asStateFlow().collectAsState()
+
+                Scaffold(
+                    bottomBar = {
+                        NavigationBar {
+                            AppSection.entries.forEach { section ->
+                                NavigationBarItem(
+                                    selected = currentSection == section,
+                                    onClick = { currentSection = section },
+                                    icon = { androidx.compose.material3.Icon(section.icon, contentDescription = section.label) },
+                                    label = { Text(section.label) }
+                                )
+                            }
+                        }
+                    }
+                ) { innerPadding ->
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(innerPadding),
+                        color = MaterialTheme.colorScheme.background
+                    ) {
+                        when (currentSection) {
+                            AppSection.HOME -> HomeScreen(
+                                state = dashboardState,
+                                runningProfileName = profileList.firstOrNull()?.name,
+                                onStartCaptureClick = ::requestScreenCapture,
+                                onStopCaptureClick = ::stopScreenCapture,
+                                onGoToAutomations = { currentSection = AppSection.AUTOMATIONS },
+                                onGoToSettings = { currentSection = AppSection.SETTINGS },
+                                onOpenAccessibilitySettingsClick = ::openAccessibilitySettings
+                            )
+                            AppSection.AUTOMATIONS -> AutomationsScreen(
+                                profiles = profileList,
+                                progress = runProgress,
+                                onCreateProfile = { profile -> profiles.update { it + profile } },
+                                onDeleteProfile = { profile -> profiles.update { list -> list.filterNot { it.id == profile.id } } },
+                                onStart = { profile -> automationEngine.start(profile) },
+                                onPause = { automationEngine.pause() },
+                                onResume = { automationEngine.resume() },
+                                onStop = { automationEngine.stop() }
+                            )
+                            AppSection.RECOGNITION -> RecognitionScreen()
+                            AppSection.VISION_LAB -> VisionLabScreen(
+                                bitmap = lab.bitmap,
+                                result = lab.result,
+                                isProcessing = lab.isProcessing,
+                                statusMessage = lab.statusMessage,
+                                onPickImageClick = { pickLabImage.launch("image/*") }
+                            )
+                            AppSection.SETTINGS -> SettingsScreen(
+                                captureInterval = dashboardState.captureInterval,
+                                onIntervalSelected = ::onIntervalSelected,
+                                onOpenAccessibilitySettingsClick = ::openAccessibilitySettings
+                            )
+                        }
+                    }
+                }
             }
         }
     }
@@ -126,10 +211,6 @@ class MainActivity : ComponentActivity() {
         appendLog("Captura de tela parada pelo usuário")
     }
 
-    private fun openVisionLab() {
-        startActivity(Intent(this, VisionLabActivity::class.java))
-    }
-
     private fun openAccessibilitySettings() {
         startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
     }
@@ -147,127 +228,126 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun loadAndAnalyzeLabImage(uri: Uri) {
+        labState.value = labState.value.copy(isProcessing = true, statusMessage = "Analisando imagem...")
+        lifecycleScope.launch {
+            val bitmap = withContext(Dispatchers.IO) {
+                contentResolver.openInputStream(uri)?.use { stream -> BitmapFactory.decodeStream(stream) }
+            }
+            if (bitmap == null) {
+                labState.value = labState.value.copy(
+                    isProcessing = false,
+                    statusMessage = "Não foi possível abrir essa imagem"
+                )
+                return@launch
+            }
+            val result = withContext(Dispatchers.Default) { VisionEngine.analyze(bitmap) }
+            labState.value = LabState(
+                bitmap = bitmap,
+                result = result,
+                isProcessing = false,
+                statusMessage = "${result.objects.size} objeto(s) encontrado(s) em ${result.processingTimeMillis} ms"
+            )
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         captureManager.stop()
     }
 }
 
+/**
+ * Tela "Início" (Fase 1): enxuta, mostrando apenas o essencial — status do
+ * serviço e da captura, controles de iniciar/parar, e atalhos para as outras
+ * seções. Configurações e detalhes avançados ficam nas telas próprias.
+ */
 @Composable
-private fun DashboardScreen(
+private fun HomeScreen(
     state: DashboardState,
+    runningProfileName: String?,
     onStartCaptureClick: () -> Unit,
     onStopCaptureClick: () -> Unit,
-    onIntervalSelected: (CaptureInterval) -> Unit,
-    onOpenVisionLabClick: () -> Unit,
+    onGoToAutomations: () -> Unit,
+    onGoToSettings: () -> Unit,
     onOpenAccessibilitySettingsClick: () -> Unit
 ) {
-    Surface(
-        modifier = Modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.background
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .verticalScroll(rememberScrollState())
+            .padding(24.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .statusBarsPadding()
-                .verticalScroll(rememberScrollState())
-                .padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+        Text(
+            text = stringResource(R.string.dashboard_title),
+            style = MaterialTheme.typography.headlineMedium
+        )
+        Text(
+            text = stringResource(R.string.dashboard_subtitle),
+            style = MaterialTheme.typography.bodyMedium
+        )
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(text = "STATUS", style = MaterialTheme.typography.labelLarge)
+                StatusRow(label = "Captura de tela", value = statusLabel(state.captureStatus))
+                StatusRow(
+                    label = "Automação atual",
+                    value = runningProfileName ?: "Nenhuma selecionada"
+                )
+                Text(
+                    text = "Frames capturados: ${state.framesCaptured}",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+
+        val isCapturing = state.captureStatus == ModuleStatus.RUNNING
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text(
-                text = stringResource(R.string.dashboard_title),
-                style = MaterialTheme.typography.headlineMedium
-            )
-            Text(
-                text = stringResource(R.string.dashboard_subtitle),
-                style = MaterialTheme.typography.bodyMedium
-            )
-
-            StatusCard(label = "AUTOMAÇÃO", value = statusLabel(state.automationStatus))
-            StatusCard(label = "CAPTURA", value = statusLabel(state.captureStatus))
-            StatusCard(label = "RECONHECIMENTO", value = "OpenCV (chega na Fase 3)")
-
-            CaptureControlCard(
-                state = state,
-                onStartCaptureClick = onStartCaptureClick,
-                onStopCaptureClick = onStopCaptureClick,
-                onIntervalSelected = onIntervalSelected
-            )
-
-            Button(onClick = onOpenVisionLabClick, modifier = Modifier.fillMaxWidth()) {
-                Text(text = stringResource(R.string.button_open_vision_lab))
+            Button(
+                onClick = if (isCapturing) onStopCaptureClick else onStartCaptureClick,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = stringResource(
+                        if (isCapturing) R.string.button_stop_capture else R.string.button_start_capture
+                    )
+                )
             }
+        }
 
-            Button(onClick = onOpenAccessibilitySettingsClick, modifier = Modifier.fillMaxWidth()) {
-                Text(text = stringResource(R.string.button_open_accessibility_settings))
-            }
+        Button(onClick = onGoToAutomations, modifier = Modifier.fillMaxWidth()) {
+            Text(text = "Criar ou iniciar automação")
+        }
 
+        Button(onClick = onOpenAccessibilitySettingsClick, modifier = Modifier.fillMaxWidth()) {
+            Text(text = stringResource(R.string.button_open_accessibility_settings))
+        }
+
+        Button(onClick = onGoToSettings, modifier = Modifier.fillMaxWidth()) {
+            Text(text = "Ajustes do app")
+        }
+
+        if (state.logs.isNotEmpty()) {
             LogCard(logs = state.logs)
         }
     }
 }
 
 @Composable
-private fun StatusCard(label: String, value: String) {
-    Card(
+private fun StatusRow(label: String, value: String) {
+    Row(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text(text = label, style = MaterialTheme.typography.labelLarge)
-            Text(text = value, style = MaterialTheme.typography.titleMedium)
-        }
-    }
-}
-
-@Composable
-private fun CaptureControlCard(
-    state: DashboardState,
-    onStartCaptureClick: () -> Unit,
-    onStopCaptureClick: () -> Unit,
-    onIntervalSelected: (CaptureInterval) -> Unit
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text(
-                text = stringResource(R.string.label_frames_captured, state.framesCaptured),
-                style = MaterialTheme.typography.bodyMedium
-            )
-
-            val isRunning = state.captureStatus == ModuleStatus.RUNNING
-            Button(
-                onClick = if (isRunning) onStopCaptureClick else onStartCaptureClick,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    text = stringResource(
-                        if (isRunning) R.string.button_stop_capture else R.string.button_start_capture
-                    )
-                )
-            }
-
-            Text(
-                text = stringResource(R.string.label_capture_interval),
-                style = MaterialTheme.typography.labelLarge
-            )
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                CaptureInterval.entries.forEach { interval ->
-                    val selected = interval == state.captureInterval
-                    Button(onClick = { onIntervalSelected(interval) }) {
-                        Text(text = if (selected) "[${interval.label}]" else interval.label)
-                    }
-                }
-            }
-        }
+        Text(text = label, style = MaterialTheme.typography.bodyMedium)
+        Text(text = value, style = MaterialTheme.typography.titleSmall)
     }
 }
 
@@ -278,9 +358,9 @@ private fun LogCard(logs: List<String>) {
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text(text = "LOGS", style = MaterialTheme.typography.labelLarge)
+            Text(text = "LOGS RECENTES", style = MaterialTheme.typography.labelLarge)
             Column(modifier = Modifier.padding(top = 8.dp)) {
-                logs.asReversed().forEach { log ->
+                logs.asReversed().take(10).forEach { log ->
                     Text(text = log, style = MaterialTheme.typography.bodySmall)
                 }
             }
@@ -295,4 +375,3 @@ private fun statusLabel(status: ModuleStatus): String = when (status) {
     ModuleStatus.PAUSED -> "Pausado"
     ModuleStatus.ERROR -> "Erro"
 }
-
