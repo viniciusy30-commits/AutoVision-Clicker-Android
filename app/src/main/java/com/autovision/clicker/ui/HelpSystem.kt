@@ -7,7 +7,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.HelpOutline
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -217,7 +217,7 @@ fun HelpIcon(content: HelpContent, modifier: Modifier = Modifier) {
 
     IconButton(onClick = { showDialog = true }, modifier = modifier.size(28.dp)) {
         Icon(
-            imageVector = Icons.Filled.HelpOutline,
+            imageVector = Icons.Filled.Info,
             contentDescription = "Como funciona: ${content.title}"
         )
     }

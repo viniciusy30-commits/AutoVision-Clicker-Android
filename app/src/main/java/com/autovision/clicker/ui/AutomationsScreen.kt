@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
@@ -202,18 +201,25 @@ private fun CreateProfileForm(onCreate: (AutomationProfile) -> Unit) {
                 label = { Text("Nome da automação") },
                 modifier = Modifier.fillMaxWidth()
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
                 OutlinedTextField(
                     value = x,
                     onValueChange = { x = it.filter(Char::isDigit) },
                     label = { Text("X") },
-                    modifier = Modifier.fillMaxWidth().weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
                 )
                 OutlinedTextField(
                     value = y,
                     onValueChange = { y = it.filter(Char::isDigit) },
                     label = { Text("Y") },
-                    modifier = Modifier.fillMaxWidth().weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
                 )
             }
             OutlinedTextField(
