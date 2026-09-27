@@ -3,9 +3,9 @@ package com.autovision.clicker.ui
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.RemoveRedEye
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.ui.graphics.vector.ImageVector
 
 /**
@@ -17,6 +17,6 @@ enum class AppSection(val label: String, val icon: ImageVector) {
     HOME("Início", Icons.Filled.Home),
     AUTOMATIONS("Automações", Icons.Filled.PlayArrow),
     RECOGNITION("Reconhecimento", Icons.Filled.Search),
-    VISION_LAB("Vision Lab", Icons.Filled.RemoveRedEye),
+    VISION_LAB("Vision Lab", Icons.Filled.Star),
     SETTINGS("Ajustes", Icons.Filled.Settings)
 }

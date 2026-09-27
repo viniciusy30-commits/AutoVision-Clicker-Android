@@ -31,6 +31,7 @@ androidx_test_ext_junit_ktx = { module = "androidx.test.ext:junit-ktx", version.
 compose-bom = { module = "androidx.compose:compose-bom", version.ref = "compose-bom" }
 compose_material3 = { module = "androidx.compose.material3:material3" }
 compose_material_icons_core = { module = "androidx.compose.material:material-icons-core" }
+compose_material_icons_extended = { module = "androidx.compose.material:material-icons-extended" }
 compose_foundation = { module = "androidx.compose.foundation:foundation" }
 compose_ui = { module = "androidx.compose.ui:ui" }
 compose_ui_tooling = { module = "androidx.compose.ui:ui-tooling" }
